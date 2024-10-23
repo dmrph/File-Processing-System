@@ -1,4 +1,4 @@
-## Files
+## Files from instructions
 
 Some files from The Calgary Corpus: [Calgary Corpus](https://corpus.canterbury.ac.nz/descriptions/#calgary)
 
