@@ -1,0 +1,33 @@
+# Compiled object files and binaries
+*.o
+*.out
+*.exe
+wordcount
+
+# macOS files
+.DS_Store
+
+# Debug files and directories
+*.dSYM/
+*.dSYM
+*.stackdump
+
+# VS Code folders and files
+.vscode/
+.vscode/*
+
+# Logs
+*.log
+
+# Backup files
+*.bak
+*.swp
+
+# Temp files
+*.tmp
+*.temp
+~*
+
+# Exclude build artifacts
+wordcount.dSYM/
+wordcount.dSYM/*
