@@ -8,6 +8,8 @@
 #include <fcntl.h>
 #include <ctype.h>
 #include <time.h>
+#include <limits.h>  
+#include <sys/param.h>  
 
 #define MAX_THREADS 8
 #define BUFFER_SIZE 4096
@@ -174,20 +176,213 @@ void process_file_single_thread(char *filename, char *word, int *result) {
     fclose(file);
 }
 
+// structure to hold word frequency data for top 50 words
+typedef struct {
+    char word[256];
+    int frequency;
+} word_freq_type;
+
+// hold data needed for each thread
+typedef struct {
+    char *filename;
+    word_freq_type *word_freqs;
+    int *word_count;
+    pthread_mutex_t *mutex;
+} freq_thread_data_type;
+
+int compare_freq(const void *a, const void *b) {
+    word_freq_type *w1 = (word_freq_type *)a;
+    word_freq_type *w2 = (word_freq_type *)b;
+    return w2->frequency - w1->frequency;  // sort in descending order
+}
+
+int find_word(word_freq_type *freqs, int count, const char *word) {
+    if (!freqs || !word) return -1;
+    for (int i = 0; i < count; i++) {
+        if (strcmp(freqs[i].word, word) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void process_word(char *word, word_freq_type *freqs, int *count, pthread_mutex_t *mutex) {
+    if (!word || !freqs || !count || !mutex) return;
+    
+    // ignore single character words and very long words
+    if (strlen(word) <= 1 || strlen(word) >= 255) return;
+    
+    // convert word to lowercase
+    for (int i = 0; word[i]; i++) {
+        word[i] = tolower(word[i]);
+    }
+    
+    pthread_mutex_lock(mutex);
+    int idx = find_word(freqs, *count, word);
+    if (idx >= 0) {
+        freqs[idx].frequency++;
+    } else if (*count < 1000) {
+        strncpy(freqs[*count].word, word, 255);
+        freqs[*count].word[255] = '\0';
+        freqs[*count].frequency = 1;
+        (*count)++;
+    }
+    pthread_mutex_unlock(mutex);
+}
+
+void *count_frequencies(void *arg) {
+    freq_thread_data_type *data = (freq_thread_data_type *)arg;
+    if (!data || !data->filename) {
+        pthread_exit(NULL);
+    }
+
+    FILE *file = fopen(data->filename, "r");
+    if (!file) {
+        pthread_exit(NULL);
+    }
+
+    char word[256];
+    int c;
+    int pos = 0;
+
+    while ((c = fgetc(file)) != EOF) {
+        if (isalpha(c) || isdigit(c) || c == '_' || c == '-') {
+            if (pos < 255) {
+                word[pos++] = c;
+            }
+        } else if (pos > 0) {
+            word[pos] = '\0';
+            process_word(word, data->word_freqs, data->word_count, data->mutex);
+            pos = 0;
+        }
+    }
+
+    if (pos > 0) {
+        word[pos] = '\0';
+        process_word(word, data->word_freqs, data->word_count, data->mutex);
+    }
+
+    fclose(file);
+    pthread_exit(NULL);
+}
+
+void analyze_word_frequencies(char *directory, char *files[], int num_files) {
+    if (!directory || !files || num_files <= 0) {
+        printf("Invalid arguments to analyze_word_frequencies\n");
+        return;
+    }
+
+    // allocate and initialize word frequency array
+    word_freq_type *word_freqs = calloc(1000, sizeof(word_freq_type));
+    if (!word_freqs) {
+        printf("Memory allocation failed\n");
+        return;
+    }
+
+    int word_count = 0;
+    pthread_mutex_t mutex;
+    if (pthread_mutex_init(&mutex, NULL) != 0) {
+        printf("Mutex initialization failed\n");
+        free(word_freqs);
+        return;
+    }
+
+    // calculate number of threads needed
+    int num_threads = (num_files < MAX_THREADS) ? num_files : MAX_THREADS;
+    pthread_t *threads = malloc(num_threads * sizeof(pthread_t));
+    freq_thread_data_type *thread_data = malloc(num_threads * sizeof(freq_thread_data_type));
+    
+    if (!threads || !thread_data) {
+        printf("Thread memory allocation failed\n");
+        free(word_freqs);
+        pthread_mutex_destroy(&mutex);
+        free(threads);
+        free(thread_data);
+        return;
+    }
+
+    // process files in batches if num_files > MAX_THREADS
+    for (int i = 0; i < num_files; i += MAX_THREADS) {
+        int batch_size = (num_files - i < MAX_THREADS) ? (num_files - i) : MAX_THREADS;
+        
+        // create threads for current batch
+        for (int j = 0; j < batch_size; j++) {
+            char filepath[PATH_MAX];
+            snprintf(filepath, sizeof(filepath), "%s/%s", directory, files[i + j]);
+            
+            thread_data[j].filename = strdup(filepath);
+            thread_data[j].word_freqs = word_freqs;
+            thread_data[j].word_count = &word_count;
+            thread_data[j].mutex = &mutex;
+            
+            if (pthread_create(&threads[j], NULL, count_frequencies, &thread_data[j]) != 0) {
+                printf("Thread creation failed\n");
+                for (int k = 0; k < j; k++) {
+                    pthread_join(threads[k], NULL);
+                    free(thread_data[k].filename);
+                }
+                continue;
+            }
+        }
+        
+        // wait for current batch to complete
+        for (int j = 0; j < batch_size; j++) {
+            pthread_join(threads[j], NULL);
+            free(thread_data[j].filename);
+        }
+    }
+
+    // sort words by frequency
+    if (word_count > 0) {
+        qsort(word_freqs, word_count, sizeof(word_freq_type), compare_freq);
+        
+        // print top 50 words
+        printf("\nTop 50 most frequent words:\n");
+        printf("%-20s %s\n", "Word", "Frequency");
+        printf("----------------------------------------\n");
+        int print_count = (word_count < 50) ? word_count : 50;
+        for (int i = 0; i < print_count; i++) {
+            printf("%-20s %d\n", word_freqs[i].word, word_freqs[i].frequency);
+        }
+        
+        // save to file for histograms in Python
+        FILE *output = fopen("word_frequencies.txt", "w");
+        if (output) {
+            fprintf(output, "word,frequency\n"); 
+            for (int i = 0; i < word_count; i++) {
+                fprintf(output, "%s,%d\n", word_freqs[i].word, word_freqs[i].frequency);
+            }
+            fclose(output);
+            printf("\nWord frequencies saved to 'word_frequencies.txt'\n");
+        }
+    } else {
+        printf("No words found in the processed files\n");
+    }
+
+    pthread_mutex_destroy(&mutex);
+    free(thread_data);
+    free(threads);
+    free(word_freqs);
+}
+
 int main(int argc, char *argv[]) {
-    // print usage
-    if (argc < 4) {
+    // print usage and handle top50 arg
+    if (argc < 3 || (strcmp(argv[argc - 1], "--top50") != 0 && argc < 4)) {
         printf("Usage: %s <program> <directory> <word> <mode>\n", argv[0]);
         return 1;
     }
 
     char *directory = argv[1];
-    char *word = argv[2];
-    char *mode = argv[3];
+    char *word = NULL;
     char *files[] = {"bib", "paper1", "paper2", "progc", "progl", "progp", "trans"};
     int num_files = sizeof(files) / sizeof(files[0]);
     int total_count = 0;
+    char *mode = argv[argc - 1];
 
+    if (strcmp(mode, "--top50") != 0) {
+        word = argv[2];  
+    } 
+    
     clock_t start = clock();
 
     if (strcmp(mode, "--multiprocessing") == 0) {
@@ -244,14 +439,10 @@ int main(int argc, char *argv[]) {
             total_count += file_word_count;
             printf("Count of the word '%s' in file '%s': %d\n", word, files[i], file_word_count);
         }
-    /*
+
     } else if (strcmp(mode, "--top50") == 0) {
-        // find top 50 word frequencies in the files
-        
-
-
-    }
-    */
+        analyze_word_frequencies(directory, files, num_files);
+    
     } else {
         printf("Invalid mode: %s\n", mode);
         return 1;
