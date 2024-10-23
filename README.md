@@ -1,4 +1,4 @@
-# File Processing System
+# File Processing System (Outline from Canvas)
 
 ## Project Overview
 
